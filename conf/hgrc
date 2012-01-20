@@ -1,6 +1,6 @@
 [ui]
 editor=vim
-username="Pawel Piatkowski <pawelp@cubiware.com>"
+username="Pawel Piatkowski <piatkowskip@gmail.com>"
 ignore=~/.hgignore
 merge=meld
 
@@ -11,10 +11,6 @@ hgext.record=
 record=
 rdiff=/home/pablo/bin/rdiff.py
 hgk=
-#/usr/local/lib/python2.5/site-packages/hgext/hgk.py
-#crecord = ~/.crecord/
-#hgext.hgview=~/hgview/hgview/hgext/hgview.py
-hgext.hgview=/home/pablo/bin/hgview-1.2.1-1/hgext/hgview.py
 hgsilo=/home/pablo/bin/hgsilo.py
 
 [hooks]
