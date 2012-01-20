@@ -1,7 +1,0 @@
-SILO_HOST=devel.cubiware.com
-SILO_PORT=22333
-SILO_BINREPO=devel.cubiware.com:/repository
-SILO_BINREPO_USER=pablo
-SILO_FILECACHE=/home/pablo/.silocache
-SILO_COLOR=yes
-
