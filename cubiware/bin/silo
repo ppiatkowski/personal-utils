@@ -1,0 +1,1663 @@
+#!/usr/bin/perl
+#
+# Sentivision K.K. Software License Version 1.1
+#
+# Copyright (C) 2006 Sentivision K.K. All rights reserved.
+#
+# Any rights which are not expressly granted in this License are entirely and
+# exclusively reserved to and by Sentivision K.K. You may not rent, lease,
+# modify, translate, reverse engineer, decompile, disassemble, or create
+# derivative works based on this Software. You may not make access to this
+# Software available to others in connection with a service bureau,
+# application service provider, or similar business, or make any other use of
+# this Software without express written permission from Sentivision K.K.
+#
+# Any User wishing to make use of this Software must contact Sentivision K.K.
+# to arrange an appropriate license. Use of the Software includes, but is not
+# limited to:
+# (1) integrating or incorporating all or part of the code into a product for
+#     sale or license by, or on behalf of, User to third parties;
+# (2) distribution of the binary or source code to third parties for use with
+#     a commercial product sold or licensed by, or on behalf of, User.
+#
+
+require 5.000; 
+use strict 'vars', 'refs', 'subs';
+use Silo::Project;
+use Silo::System;
+use Data::Dumper;
+use File::Temp qw/ tempfile tempdir cleanup /;
+use Cwd;
+use POSIX qw(strftime);
+
+my $VERSION='0.4.12';
+$ENV{SILO_VERSION}=$VERSION;
+
+#SETTINGS
+foreach my $dir ("$ENV{HOME}/.silo", "/etc/silo") {
+	if ( -e $dir ) {
+		_d("reading config $dir");
+		open(my $hand,"<$dir") or die "settings open error: $!";
+		while (<$hand>) {
+			chomp; #increment line nr and remove "\r\n"
+			s/([#;]).*//; #remove comments
+			s/\s*$//; #remove blank at end of line
+			$ENV{$1}=$2 if (/\s*(\S*)\s*=\s*(\S*)\s*/ && !defined $ENV{$1});
+			_d("$1 => $2");
+		};
+		close($hand)
+	}
+}
+
+#USAGE
+# see sub silo_usage
+#
+
+#PARSE ARGUMENTS
+my @reserved=qw( help version test make pull record push list register branch 
+release repository from to rc restore sync nocache export verbose 
+bugfix patch feature phase
+id name comment last user summary path vcs
+share base for access at
+harvest sbuild
+logs diff briefly
+observer
+component unit-test translations );
+%_=(); @reserved=grep { !$_{$_}++ } @reserved; %_=();
+my %reserved=map { $_=>'reserved' } @reserved;
+my %cmd=();
+parse_command(\@ARGV) or silo_usage();
+
+
+#setting silod host name
+$ENV{SILO_HOST}='devel' unless defined $ENV{SILO_HOST};
+$ENV{SILO_HOST}=undef if $ENV{SILO_HOST} eq 'localhost';
+#setting silod user name on host
+if ( ! defined $ENV{SILO_USER} ) {
+	$ENV{SILO_USER}= $ENV{SILO_HOST}=~s/(.+)@(.+)/$2/ ? $1 : $ENV{USER};
+}
+die "silo user is unknown" unless $ENV{SILO_USER};
+#setting silod port
+if ( ! defined $ENV{SILO_PORT} ) {
+	$ENV{SILO_PORT}= $ENV{SILO_HOST}=~s/(.+):(.+)/$1/ ? $2 : 22;
+}
+#binary repository settings (external binary tarballs)
+$ENV{SILO_BINREPO}="$ENV{SILO_HOST}:/repository" unless defined $ENV{SILO_BINREPO};
+$ENV{SILO_BINREPO_PORT}=$ENV{SILO_PORT} unless defined $ENV{SILO_BINREPO_PORT};
+$ENV{SILO_BINREPO_USER}=$ENV{SILO_USER} unless defined $ENV{SILO_BINREPO_USER};
+$ENV{SILO_PRJ}='P' unless defined $ENV{SILO_PRJ};
+$ENV{SILO_VCS}='hg' unless defined $ENV{SILO_VCS};
+$ENV{SILO_DEBUG_DEPS}='no' unless defined $ENV{SILO_DEBUG_DEPS};
+#debug/verbose/silent
+$ENV{SILO_DEBUG}='no' unless defined $ENV{SILO_DEBUG};
+$ENV{SILO_VERBOSE}='no' unless defined $ENV{SILO_VERBOSE};
+$ENV{SILO_SILENT}='no' unless defined $ENV{SILO_VCS};
+#unused or almost unused variables
+$ENV{SILO_ROOT}='/silo' unless defined $ENV{SILO_ROOT};
+$ENV{SILO_FORCE}='no' unless defined $ENV{SILO_FORCE};
+
+
+#HOST
+my $host=new Silo::Host;
+
+sub CleanUp {
+	File::Temp::cleanup();
+	$host->kill();
+	_info("...interrupted");
+	exit;
+}
+$SIG{INT} = "CleanUp";
+
+#replace the branch name with id
+foreach my $a (values %cmd) {
+	next unless ref $a eq 'HASH';
+	$a->{branch}=str2bid($a->{branch}) if ( defined $a->{branch} );
+	$a->{to}->{branch}=str2bid($a->{to}->{branch}) if ( defined $a->{to} && defined $a->{to}->{branch} );
+	$a->{from}->{branch}=str2bid($a->{from}->{branch}) if ( defined $a->{from} && defined $a->{from}->{branch} );
+}
+
+
+#DO JOB
+if      ( $cmd{make} ) { # !!! MAKE
+	make() or _fail("make failed");
+} elsif ( $cmd{parse} ) { # !!! PARSE
+	parse() or _fail("parse failed");
+} elsif ( $cmd{pull} ) { # !!! PULL
+	s_pull() or _fail("pull failed");
+} elsif ( $cmd{record} ) { # !!! PULL
+	s_foreach("record") or _fail("record failed");
+} elsif ( $cmd{diff} ) { # !!! PULL
+	s_foreach("diff") or _fail("diff failed");
+} elsif ( $cmd{push} ) { # !!! PULL
+	s_push() or _fail("push failed");
+} elsif ( $cmd{logs} ) { # !!! LOGS
+	logs() or _fail("logs failed");
+} elsif ( $cmd{branch} ) { # !!! BRANCH
+	branch() or _fail("branch failed");
+} elsif ( $cmd{list} ) { # !!! LIST
+	list() or _fail("list failed");
+} elsif ( $cmd{comment} ) { # !!! COMMENT
+	comment() or _fail("comment failed");
+} elsif ( $cmd{register} ) { # !!! REGISTER
+	register() or _fail("registeration failed");
+} elsif ( $cmd{deregister} ) { # !!! DEREGISTER
+	deregister() or _fail("registeration failed");
+} elsif ( $cmd{release} ) {
+	release() or _fail("release failed");
+} elsif ( $cmd{share} ) {
+	sshare() or _fail("share failed");
+} elsif ( $cmd{version} ) {
+	print "client version: $VERSION\n";
+	my $ref=$host->req('version') or _fail("host: $host->{err}");
+	print "daemon version: $ref->{version}\n";
+} elsif ( $cmd{help} ) {
+	silo_usage();
+} elsif ( $cmd{test} ) {
+	$host->req('test');
+} else { # !!! END OF SECTION
+	print "unknown command\n"; 
+	silo_usage();
+}
+
+exit 0;
+
+
+sub str2h {
+	return Silo::Project::str2h(@_);
+}
+
+sub str2bid { #string to branch id
+	my ($str)=@_;
+	if ( my $h=str2h($str) ) {
+		my $pn=$h->{name}; #project name
+		my $pv=$h->{version}->{number}; #project version
+		my $b=$host->get('branch',(project=>$pn,release=>$pv)) or _fail("branch for $str was not found");
+		_info("string $str => branch id $b->{id}");
+		return $b->{id};
+	}
+	return $str;
+}
+
+sub parse_objects {
+	my ($cmd,$ret,@keywords)=@_;
+	my %keys=map { $_=>'key' } @keywords;
+	my $keys=\%keys;
+	# cmd - array with command
+	# ret - hash to insert values
+	# keys - reserved keywords
+	_d("keys: ".Dumper($keys));
+	my $type=$keywords[0]; #default type
+	my $names;
+get_objects:
+	# get objects
+	$_=shift @$cmd;
+	#get type
+	if ( /^project$/ && $keys->{project} ) {
+		$type='project';
+		$names=$ret->{$type}=[];
+	} elsif ( /^component$/ && $keys->{component} ) {
+		$type='component';
+		$names=$ret->{$type}=[];
+	} elsif ( /^file$/ && $keys->{file} ) {
+		$type='file';
+		$names=$ret->{$type}=[];
+	} elsif ( /^repository$/ && $keys->{repository} ) {
+		$type='repository';
+		$names=$ret->{$type}=[];
+	} elsif ( -d $_ && $keys->{repository} ) {
+		$type='repository';
+		$names=$ret->{$type}=[];
+		@$cmd=($_,@$cmd);
+	} elsif ( ( /^release$/ && $keys->{release} )
+   			|| ( /^sbuild$/ && $keys->{sbuild} )
+   			|| ( /^feature$/ && $keys->{feature} )
+   			|| ( /^phase$/ && $keys->{phase} )
+   			|| ( /^patch$/ && $keys->{patch} )
+			|| ( /^bugfix$/ && $keys->{bugfix} ) 
+   			|| ( /^harvest$/ && $keys->{harvest} )
+			                                      ) {
+		$_="patch" if $_ eq "bugfix"; #replace keyword
+    	$type=$_;
+	    $names=$ret->{$type}=[];
+	} elsif ( /^branch$/ && $keys->{branch} ) {
+		$names=$ret->{branch}=shift @$cmd;
+		return 1;
+	} elsif ( /^(base|share)$/ && $keys->{$_} ) {
+		$names=$ret->{$_}=shift @$cmd;
+		return 1;
+	} elsif ( /^shell$/ && $keys->{shell}) {
+		$names=$ret->{shell}=[@$cmd?@$cmd:'sh'];
+		@$cmd=();
+		return 1;
+	} elsif ( /^translations/ && $keys->{translations}) {
+		$type='translations';
+		$names=$ret->{$type}=[];
+	} else {
+		#set default here
+		delete $ret->{$type};
+		if (/\.comp$/) {
+			_info("guess component build");
+			$type='component';
+		} elsif (/(Makefile)/) {
+			_info("guess makefile build");
+			$type='file';
+		}
+		@$cmd=($_,@$cmd);
+		$names=$ret->{$type}=[];
+	}
+	#get names
+	while ( @$cmd ) {
+		$_=shift @$cmd;
+		if ( $keys->{$_} ) { #if on list of objects
+			@$cmd=($_,@$cmd); #shift back
+			goto get_objects;
+		}
+		if ( $reserved{$_} || ( /(.*?)[=]/ && $reserved{$1} ) ) { #if word reserved
+			@$cmd=($_,@$cmd); #shift back
+			last;
+		}
+		#TODO: process project like components or makefiles
+		if ( $type=~/^(component|file)$/ ) {
+			if (-e $_) {
+				#push name of component
+				push (@$names,{name=>$_,target=>[]});
+			} else {
+				silo_usage("file $_ not found") unless @$names;
+				#push targets/flags for components/makefiles
+				push(@{$names->[$#$names]->{target}},$_);
+			}
+		} else {
+			push (@$names,$_);
+		}
+	}
+	#default entries in tabs
+	unless ( scalar @$names ) {
+		if ( $ret->{project} ) {
+			push(@{$ret->{project}},undef);
+		} elsif ( $ret->{repository} ) {
+            push(@{$ret->{repository}},'./');
+		} elsif ( $ret->{file} ) {
+			foreach (qw(GNUmakefile makefile  Makefile )) {
+				if ( -f $_ ) {
+					push(@{$ret->{file}},{name=>$_,target=>[]});
+					last;
+				}
+			}
+		}
+	}
+	_d("object: ".Dumper($ret));
+	return (scalar @$names) + 1;
+}
+
+sub parse_spec {
+	my ($cmd,$ret,$names)=@_;
+	# cmd - array with command
+	# ret - hash to insert values
+	# keys - reserved keywords
+	while ( @$cmd ) {
+		$_=shift @$cmd;
+		if ( /^(.*?)=(.*)$/ ) {
+			if ( $names->{$1} ) {
+				$ret->{$1}=$2;
+			} else {
+				silo_usage("unknown field $1")
+			}
+		} elsif ($reserved{$_}) {
+			@$cmd=($_,@$cmd);
+			last;
+		} elsif ($names->{default}) {
+			$ret->{$names->{default}}=$_;
+		} else {
+			silo_usage("unknown parameters format $_");	
+		}
+	}
+	foreach(keys %$names) {
+		if ($names->{$_} eq 'm' && ! $ret->{$_}) {
+			silo_usage("$_ should be specified");
+		}
+	}
+	_d("spec: ".Dumper($ret));
+	return 1;
+}
+
+sub parse_options {
+	my ($cmd,$ret,@keywords)=@_;
+	my %keys=map { $_=>1 } @keywords;
+	my $keys=\%keys;
+	# cmd - array with command
+	# ret - hash to insert values
+	# keys - reserved keywords
+	while ( @$cmd ) {
+		$_=shift @$cmd;
+		if ( /^from$/ && $keys->{from} ) {
+			$_=shift @$cmd;
+			if ( /^branch$/ && $keys->{from_branch}) {
+				my $str=shift @$cmd;
+				$ret->{from}->{branch}=$str;
+			} elsif ( /^tag$/ && $keys->{from_tag}) {
+				$ret->{from}->{tag}=shift @$cmd;
+			} elsif ( /^project$/ && $keys->{from_project}) {
+				$ret->{from}->{project}=shift @$cmd;
+			} else {
+				$ret->{from}->{branch}=$_;
+			}
+		} elsif ( /^to$/ && $keys->{to} ) {
+			$_=shift @$cmd;
+			if ( /^branch$/ && $keys->{to_branch}) {
+				my $str=shift @$cmd;
+				$ret->{to}->{branch}=$str;
+			} else {
+				$ret->{to}->{branch}=$_;
+			}
+		} elsif ( /^with$/ && $keys->{with} ) {
+			$_=shift @$cmd;
+			if ( /^group$/ && $keys->{with_group}) {
+				$ret->{with}->{group}=shift @$cmd;
+			} else {
+				$ret->{with}->{group}=$_;
+			}
+		} elsif ( /^for$/ && $keys->{'for'} ) {
+			$_=shift @$cmd;
+			if ( /^access$/ && $keys->{for_access}) {
+				$ret->{'for'}->{access}=shift @$cmd;
+			} else {
+				$ret->{'for'}->{access}=$_;
+			}
+		} elsif ( /^at$/ && $keys->{'at'} ) {
+			$_=shift @$cmd;
+			if ( /^host$/ && $keys->{at_host}) {
+				$ret->{'at'}->{host}=shift @$cmd;
+			} else {
+				$ret->{'at'}->{host}=$_;
+			}
+		} elsif ( /^rc$/ && $keys->{rc} ) {
+			$_=shift @$cmd;
+			if (/^[[:digit:]]+$/) { #digit
+				$ret->{rc}=$_?$_:'not null';
+			} else {
+				@$cmd=($_,@$cmd) if $_;
+				$ret->{rc}='not null';
+			}
+		} elsif ( /^verbose$/ && $keys->{verbose} ) {
+				$ret->{verbose}=1;
+				$ENV{SILO_VERBOSE}='yes';
+		} elsif ( $keys->{$_} ) {
+				$ret->{$_}=1;
+		} else {
+			silo_usage("unknown parameter $_");	
+		}
+	}
+	_d("options: ".Dumper($ret));
+	return 1;
+}
+
+sub complete_keys {
+	my ($cmds,$keys)=@_;
+	return undef unless ($cmds);
+	return undef unless ($cmds);
+command: for ( my $i=0; $i<@$cmds; $i++) {
+		my $cmd=$cmds->[$i];
+		my $key=undef;
+		foreach (@$keys) {
+			if ( ! -e $cmd && /^$cmd/) {
+				if ($key) {
+					silo_usage("unable to complete keyword, ".
+						"the pattern '$cmd' matches at least '$key' and '$_'");
+				}
+				$key=$_;
+			}
+		}
+		if ( $key && $key ne $cmd ) {
+			$cmds->[$i]=$key;
+			_info("key completed: $cmd -> $key");
+		}
+	}
+}
+
+sub parse_command {
+	my ($cmd)=@_;
+	complete_keys($cmd, \@reserved);
+	my $ret=\%cmd;
+	my $c=shift @$cmd;
+	my $args=$ret->{$c}={};
+	if ( $c=~/^(version|test)$/ ) {
+		$ret->{$1}=$1;
+	} elsif ( $c eq 'help' ) {
+		$ret->{$c}->{cmd}=shift @$cmd;
+	} elsif ( $c eq 'make' ) {
+		parse_objects($cmd,$args, qw(project component file branch shell translations)) 
+		  or silo_usage("make what? a make object should be specified");
+		if ($args->{branch}) {
+			parse_options($cmd,$args,qw(rc sync 
+					at at_host
+					nocache export restore verbose unit-test));
+		} elsif ( $args->{project} ) {
+			parse_options($cmd,$args,qw(from from_branch sync restore
+					at at_host
+					nocache export restore verbose unit-test));
+			silo_usage("from branch ...? if you want to sync then a source branch should be specified") unless ( $args->{from}->{branch} || ! $args->{sync} );
+		} elsif ( $args->{file} ) {
+			push(@$cmd,'restore');
+			push(@$cmd,'verbose');
+			parse_options($cmd,$args,qw(restore verbose));
+		} elsif ( $args->{component} ) {
+			push(@$cmd,'restore');
+			push(@$cmd,'verbose');
+			parse_options($cmd,$args,qw(from from_project restore
+					verbose unit-test));
+		}
+	} elsif ( $c eq 'parse' ) {
+		parse_objects($cmd,$args, qw(project)) 
+		  or silo_usage("parse what? objects to parse should be specified");
+		if ( $args->{project} ) {
+			parse_options($cmd,$args,qw(from from_branch sync verbose at at_host));
+			silo_usage("from branch ...? if you want to sync then a source branch should be specified") unless ( $args->{from}->{branch} || ! $args->{sync} );
+		}
+	} elsif ( $c eq 'logs' ) {
+        my $spec=$args->{spec}={};
+		parse_objects($cmd,$args, qw(repository))	
+			or silo_usage("repositories list should be provided");
+		parse_spec($cmd,$spec,{user=>'o',from=>'o',last=>'o',summary=>'o'});
+	} elsif ( $c eq 'pull' ) {
+		push(@$cmd,'sync');
+		push(@$cmd,'restore');
+		parse_objects($cmd,$args,qw(project branch repository harvest sbuild release))
+			or silo_usage("object to pull is unknown");
+		push(@$cmd,('from', 'branch', $args->{branch})) if $args->{branch};
+		parse_options($cmd,$args,qw(from from_branch restore sync at at_host));
+		if ( ! $args->{from}->{branch} && ! $args->{harvest} && ! $args->{sbuild} && ! $args->{release} ) {
+			# I mean the "from branch option is required, unless the object is harvest sbuild release
+			silo_usage("from branch ...? source branch should be specified");
+		}
+	} elsif ( $c eq 'record' or $c eq 'diff' ) {
+		push(@$cmd,'restore');
+		parse_objects($cmd,$args,qw(project repository))
+			or silo_usage("object to $c is unknown");
+		parse_options($cmd,$args,qw(restore briefly));
+	} elsif ( $c eq 'push' ) {
+		push(@$cmd,'restore');
+		parse_objects($cmd,$args,qw(project repository))
+			or silo_usage("object to pull is unknown");
+		push(@$cmd,('to', 'branch', $args->{branch})) if $args->{branch};
+		parse_options($cmd,$args,qw(to to_branch restore at at_host));
+		silo_usage("to branch ...? destination branch should be specified") unless ( $args->{to}->{branch} );
+	} elsif ( $c eq 'list' ) {
+        my $spec=$args->{spec}={};
+		$_=shift @$cmd;
+		if ( $_=~/^proj(ect)?(s)?$/ ) {
+			$args->{tab}='project';
+			parse_spec($cmd,$spec,{default=>'name',id=>'o',name=>'o',comment=>'o',version=>'o'});
+		} elsif ( $_=~/^branch(es)?$/ ) {
+			$args->{tab}='branch';
+			parse_spec($cmd,$spec,{default=>'id',id=>'o',project=>'o',repository=>'o',state=>'o',release=>'o'});
+		} elsif ( $_=~/^repo(sitor(y|ies)|s)?$/ ) {
+			$args->{tab}='repository';
+			parse_spec($cmd,$spec,{default=>'path',id=>'o',path=>'o',vcs=>'o'});
+		} elsif ( $_=~/^sh(are)?(s)?$/ ) {
+			$args->{tab}='share';
+			parse_spec($cmd,$spec,{default=>'group',id=>'o',group=>'o',tab_name=>'o',tab_id=>'o', access=>'o'});
+		} elsif ( $_=~/^ob(server)?(s)?$/ ) {
+			$args->{tab}='observer';
+			parse_spec($cmd,$spec,{default=>'address',id=>'o',address=>'o',branch=>'o', repository=>'o', project=>'o',owner=>'o'});
+		} elsif ( $_=~/^changesets$/ ) {
+			$args->{tab}='changesets';
+			parse_spec($cmd,$spec,{repo=>'m',branch=>'m'});
+		} else { silo_usage("$_? do not know how to list it"); }
+		parse_options($cmd,$args,qw(at at_host));
+		my @k=@$cmd;
+		$args->{keys}=\@k;
+		@$cmd=();
+	} elsif ( $c eq 'branch' ) {
+		parse_objects($cmd,$args, qw(project repository phase release patch bugfix feature));
+		parse_options($cmd,$args,qw(from from_branch at at_host));
+		silo_usage("from branch ...? source branch should be specified") unless ( $args->{from}->{branch} );
+	} elsif ( $c eq 'comment' ) {
+		my $comment=pop @$cmd;
+		parse_objects($cmd,$args, qw(project repository share branch))
+			or silo_usage();
+		$args->{text}=$comment
+				or silo_usage("comment cannot be empty");
+#	} elsif ( $c eq 'deregister' ) {
+#        my $spec=$args->{spec}={};
+#		parse_objects($cmd,$args, qw(repository)) or silo_usage();
+#		parse_options($cmd,$args,qw(from from_branch at at_host)) or silo_usage();
+#		silo_usage("source branch should be specified!") unless ( $args->{from}->{branch});
+	} elsif ( $c eq 'register' ) {
+        my $spec=$args->{spec}={};
+		my $tab=$args->{tab}=shift @$cmd;
+		if ( $tab eq 'project' ) {
+			parse_spec($cmd,$spec,{name=>'m',comment=>'m',version=>'o'});
+		} elsif ( $tab eq 'repository' ) {
+			parse_spec($cmd,$spec,{path=>'m',vcs=>'o',comment=>'m'});
+			$spec->{vcs}='hg' unless $spec->{vcs}; #hg is default vcs
+			silo_usage("only mercurial (hg) VCS is currently fully supported") unless ($spec->{vcs} eq 'hg');
+		} elsif ( $tab eq 'branchrepo' ) {
+			parse_spec($cmd,$spec,{branch_id=>'m',repo_id=>'m'});
+		} elsif ( $tab eq 'observer' ) {
+			parse_spec($cmd,$spec,{address=>'m', branch=>'o', repository=>'o', project=>'o', comment=>'o'});#currently only branches are supported
+#			silo_usage("one of branch id or repository or project should be specified") unless $spec->{branch} or $spec->{repository} or $spec->{project};
+		} else {
+			silo_usage("$tab? do not know how to $c it");
+		}
+		parse_options($cmd,$args,qw(at at_host));
+	} elsif ( $c eq 'deregister' ) {
+        my $spec=$args->{spec}={};
+		my $tab=$args->{tab}=shift @$cmd;
+		if ( $tab eq 'observer' ) {
+			parse_spec($cmd,$spec,{address=>'m', branch=>'o', repository=>'o', project=>'o', comment=>'o'});#currently only branches are supported
+#			silo_usage("one of branch id or repository or project should be specified") unless $spec->{branch} or $spec->{repository} or $spec->{project};
+		} else {
+			silo_usage("$tab? do not know how to $c it");
+		}
+		parse_options($cmd,$args,qw(at at_host));
+	} elsif ( $c eq 'release' ) {
+		parse_objects($cmd,$args,qw(branch)) 
+				or silo_usage("branch id should be specified");
+		parse_options($cmd,$args,qw(rc at at_host));
+		unless ($args->{rc}=~/^[[:digit:]]+$/) {
+			silo_usage("rc number should be specified");
+		}
+	} elsif ( $c eq 'share' ) {
+		parse_objects($cmd,$args,qw(branch base)) or silo_usage("what do you want to share?");
+		parse_options($cmd,$args,qw(with with_group for for_access at at_host));
+		$args->{for}->{access}='read' if (! $args->{for}->{access} && $args->{base} );
+		silo_usage("group to share with should be specified") unless ( $args->{with}->{group} );
+		silo_usage("access type for the group should be specified and should be read or write") unless ( $args->{for}->{access}=~/^(read|write)$/ );
+	} else {
+		silo_usage("unknown command '$c'");
+	}
+
+	if ($args->{at}->{host}) {
+		$ENV{SILO_HOST}=$args->{at}->{host};
+	}
+
+done:
+	silo_usage("unknown keys: ".join(", ",@$cmd)) if (@$cmd);
+#	if ( $c =~/^(make)$/ && open(my $h,">$ENV{PWD}/.silo-last-cmd.xml") ) {
+#		print $h XMLout($ret);
+#		close($h);
+#	} else {
+#		unlink("$ENV{PWD}/.silo-last-cmd.xml");
+#	}
+	_d("command: ".Dumper($ret));
+	return $ret;
+}
+
+sub branch {
+	my $args=$cmd{branch};
+	my %repos;
+	my @repos=$args->{repository}?@{$args->{repository}}:();
+	my @projs;
+	#parse projects to get repositories
+	$args->{sync}=1;
+	$args->{src}=new Silo::Source($args);
+	my ($tdir,$bdir)=(tempdir(CLEANUP=>1),$ENV{PWD});
+	$ENV{PWD}=$tdir; chdir($tdir);
+	
+	my $type=$args->{release} ?'release':
+				$args->{patch}?'patch':
+				$args->{phase}?'phase':
+				$args->{feature}?'feature':'release';#<-deafault branch type
+
+	foreach my $proj (@{$args->{project}},@{$args->{$type}}){
+		next unless $proj;
+		my $prj=new Silo::Project($proj,$args)  or _fail("branch failed at $proj\n");
+		my @r=$prj->get_repos();
+		push(@repos,@r) if scalar @r;
+		$prj->cleanup();
+		push(@projs,$proj) ;
+	}
+	chdir($bdir); $ENV{PWD}=$bdir;
+	_sys("rm -rf $tdir",proc=>"cleanup temporary...");
+	#make uniq
+	my %saw;
+	@repos=grep {!$saw{$_}++} @repos;
+
+	# request branch on the host
+	my $ref=$host->req('branch',(
+					repositories=>\@repos,
+					projects=>\@projs,
+					type=>$type,
+					parent=>$args->{from}->{branch})) 
+			or _fail("host: $host->{err}");
+	# done
+	print "ID is $ref->{branch}->{id}\n";
+	print "branch success!\n";
+	return 1;
+}
+
+sub parse {
+	my $args=$cmd{parse};
+	my @projs=$args->{project}?@{$args->{project}}:();
+	$args->{src}=new Silo::Source($args);
+	foreach my $proj (@projs){
+		my $prj=new Silo::Project($proj,$args) 
+				|| _fail("$proj project parse failed\n");
+		$prj->check_syntax();
+		$prj->cleanup();
+	}
+	return 1;
+}
+
+sub make {
+	my $args=$cmd{make};
+	# redirect to rc if making release candidate
+	return make_rc() if ($args->{rc});
+	return make_branch() if ($args->{branch});
+	return make_project() if ($args->{project});
+	return make_component() if ($args->{component});
+	return make_file() if ($args->{file});
+	return make_shell() if ($args->{shell});
+	return make_translations() if ($args->{translations});
+}
+
+sub get_branch_projects {
+	my ($branch_id,$projects)=@_;
+	my $branch=$host->get('branch',(id=>$branch_id)) 
+			or _fail("unable to get branch by id(=$branch_id)");
+	#find project not included in branch
+	my %bprojects=map { $_->{name}=>1 } values %{$branch->{projects}};
+	foreach my $p ( @$projects ) {
+		unless ( $bprojects{$p} ) {
+			_fail("project $p is not included in branch $branch_id");
+		}
+	}
+	#set list of projects and sequence of build
+bproject: foreach my $bp (values %{$branch->{projects}}){
+		foreach my $p (@$projects) { next bproject if ($p eq $bp->{name});}
+		push(@$projects,$bp->{name});
+	}
+	#TODO: find project not included in branch
+	return $projects;
+}
+
+sub get_branch_repos {
+	my ($branch_id)=@_;
+	my $branch=$host->get('branch',(id=>$branch_id)) 
+			or _fail("unable to get branch by id(=$branch_id)");
+	my @repos=map { $_->{path} } values %{$branch->{repositories}};
+	return \@repos;
+}
+
+sub make_shell {
+	my $args=$cmd{make};
+	my $project=$args->{from}->{project};
+	#make common source
+	$args->{src}=new Silo::Source($args);
+	$args->{restore}=1;
+	$args->{nocache}=1;
+	my $prj=new Silo::Project($project,$args) 
+			or _fail("failed to restore project");
+	$prj->build('shell',$args->{shell}) 
+				or _fail("shell exit with error");
+	return 1;
+}
+
+
+sub make_file {
+	my $args=$cmd{make};
+	my $project=$args->{from}->{project};
+	#make common source
+	$args->{src}=new Silo::Source($args);
+	$args->{restore}=1;
+	$args->{nocache}=1;
+	my $prj=new Silo::Project($project,$args) 
+			or _fail("failed to restore project");
+	foreach my $c ( @{$args->{file}} ) {
+		$prj->build($c->{name},$c->{target}) 
+				or _fail("failed to make $c->{name}");
+		_info("file $c->{name} ".join(" ",@{$c->{target}})." made");
+	}
+	print "make success!\n";
+	return values %{$args->{file}};
+}
+
+sub make_component {
+	my $args=$cmd{make};
+	my $project=$args->{from}->{project};
+	#make common source
+	$args->{src}=new Silo::Source($args);
+	my $prj=new Silo::Project($project,$args) 
+			or _fail("failed to restore project");
+	foreach my $c ( @{$args->{component}} ) {
+		$prj->build($c->{name},$c->{target}) 
+				or _fail("failed to make $c->{name}");
+		_info("component $c->{name} ".join(" ",@{$c->{target}})." made");
+	}
+	print "make success!\n";
+	return @{$args->{component}};
+}
+
+sub make_project {
+	my $args=$cmd{make};
+	my $projects=$args->{project};
+	#make common source
+	$args->{src}=new Silo::Source($args) unless $args->{src};
+	#biuld all projects in branch
+	_fail("project list is empty") unless ( @$projects );
+	foreach my $p (@$projects) {
+		if ($args->{rc}) {
+			my $hprj=$host->get('project',(name=>$p))
+				or _fail("project not found: $host->{err}");
+			my $hrel=$host->get('release', 
+				(project_id=>$hprj->{id},branch_id=>$args->{branch}))
+				or _fail("$p release in branch $args->{branch} not found: $host->{err}");
+			$args->{version}=$hrel->{version};
+		}
+		my $prj=new Silo::Project($p,$args)
+	   		or _fail("unable to create project $p\n");
+		$prj->build() or _fail("build failed");
+		# build done here
+		if ( $args->{export} ) {
+			$prj->export_build() or _fail("failed to export build");
+		}
+		$prj->cleanup();
+		_info("$p done");
+	}
+	print "make ".join(", ",@$projects)." success!\n";
+	return @$projects;
+}
+
+sub make_translations {
+	my $args=$cmd{make};
+	my $projects=$args->{translations};
+	#make common source
+	$args->{src}=new Silo::Source($args) unless $args->{src};
+	#biuld all projects in branch
+	_fail("project list is empty") unless ( @$projects );
+	foreach my $p (@$projects) {
+		my $prj=new Silo::Project($p,$args)
+	   		or _fail("unable to create project $p\n");
+		$prj->translate() or _fail("build failed");
+		# translate done here
+		$prj->cleanup();
+		_info("$p done");
+	}
+	print "make translate ".join(", ",@$projects)." success!\n";
+	return @$projects;
+}
+
+sub make_branch {
+	my $args=$cmd{make};
+	my $projects=$args->{project}?$args->{project}:[];
+	#release may be built only from branch
+	my $branch=$args->{branch} or die "branch id is unknown";
+	$args->{from}->{branch}=$branch;
+	#get first of all get a project list
+	$projects=get_branch_projects($branch,$projects);
+	#make common source
+	$args->{src}=new Silo::Source($args)
+		unless $args->{src};
+	$args->{project}=$projects;
+
+	return make_project();
+}
+
+sub make_rc {
+	my $args=$cmd{make};
+	#release may be built only from branch
+	my $branch=$args->{branch};
+	$args->{from}->{branch}=$branch;
+	$args->{sync}=1;
+	$args->{export}=1;
+	$args->{nocache}=1;
+	my $rc;
+	_fail("release source branch unspecified") unless ($branch);
+	#make RC path and chdir into it
+	my $path=$ENV{PWD}=$ENV{PWD}."/branch-$branch-RC";
+	_sys("rm -rf $path",proc=>"clean up from previos RC...");
+	mkdir($path) or die "unable to create directory $path: $!";
+	chdir($path) or die "unable to chdir to $path: $!";
+	#make common source
+	$args->{src}=new Silo::Source($args);
+	#get RC number
+	my $ref=$host->req('get_last_rc_number',(branch=>$branch))
+			or _fail("unable to get branch current rc number: $host->{err}");
+	$rc=$args->{rc}=$ref->{rc}+1;
+
+	make_branch() or _fail("failed to make RC from branch $branch");
+
+#	since version 0.3 tag were replaced with exported tarball
+#	my $tag=$args->{src}->tag($branch,$rc) or _fail("unable to tag");
+	$ref=$host->req('release_candidate',(branch=>$branch,rc=>$rc));
+	return _fail("unable to release candidate: $host->{err}") unless ( $ref || $ref->{tag} );
+
+	my $npath=$path."$rc-COMPLETE";
+	rename($path,$npath);
+	_info("built in $npath");
+	print "release candidate made in $npath!\n";
+	return 1;
+}
+
+sub s_pull {
+	my $args=$cmd{pull};
+	return pull_release() if $args->{release};
+	return pull_sbuild() if $args->{sbuild};
+	return pull_harvest() if $args->{harvest};
+	return pull_branch() if $args->{branch};
+	return pull_project() if $args->{project};
+	push(@{$args->{repository}},"./") unless ($args->{repository});
+	return pull_repo() if $args->{repository};
+}
+
+sub pull_harvest {
+	my $args=$cmd{pull};
+	my $bid=$args->{from}->{branch} or _fail("branch is unspecified");
+	my $b=$host->get('branch',(id=>$bid)) or _fail("branch not found");
+	my ($tdir,$bdir)=(tempdir(CLEANUP=>1),"$ENV{PWD}/harvest-$bid");
+	_sys("rm -rf $bdir; mkdir -p $bdir",proc=>"preparing harvest-$bid directory...");
+	$ENV{PWD}=$tdir; chdir($tdir);
+	my $res=0;
+	foreach my $bp ( values %{$b->{projects}} ) {
+		next unless $bp;
+		my $r=$host->get('release',(project_id=>$bp->{id},branch_id=>$bid)) 
+			or _fail("failed to get project: $host->{err}");
+		my $prj=new Silo::Project($bp->{name},$args)  or _fail("failed at $bp->{name}\n");
+		my $z=$prj->get_harvest({str=>"$bp->{name}-$r->{version}", dir=>$bdir}) or _warn("unable to fetch harvest for project $bp->{name}");
+		$res++ if $z;
+	}
+	chdir($bdir); $ENV{PWD}=$bdir;
+	_sys("rm -rf $tdir",proc=>"cleanup temporary...");
+	print "pull harvest ".($res?"success":"failed")."!\n";
+	return 1;
+}
+
+sub pull_release {
+    pull_build("release");
+}
+
+sub pull_sbuild {
+    pull_build("sbuild");
+}
+
+sub pull_build {
+	my ($dest)=@_;
+	my $args=$cmd{pull};
+    my $builds=$args->{$dest};
+	$args->{sync}=1;
+	$args->{src}=new Silo::Source($args);
+	my $res=0;
+    
+	my ($tdir,$opwd)=(tempdir(CLEANUP=>1),$ENV{PWD});
+	$ENV{PWD}=$tdir; chdir($tdir);
+
+	foreach my $bp ( @$builds ) {
+		next unless $bp;
+        my $dir=$opwd;
+        if ($dest eq 'release') {
+            $dir="$opwd/$bp";
+            _sys("rm -rf $dir && mkdir $dir", proc=>"preparing $bp dir...");
+        }
+		my $h=str2h($bp);
+		my $prj=new Silo::Project($h->{name},$args)  or _fail("failed at $bp\n");
+		my $z=$prj->get_build({str=>$bp,dest=>$dest,dir=>$dir}) or _warn("unable to fetch $dest for project $bp");
+		$res++ if $z;
+	}
+	chdir($opwd); $ENV{PWD}=$opwd;
+	_sys("rm -rf $tdir",proc=>"cleanup temporary...");
+	print "pull $dest ".($res?"success":"failed")."!\n";
+	return 1;
+}
+
+
+sub list_repos_in {
+	my ($src,$r,$bid)=@_;
+	my $real_r=[];
+	if ( $ENV{SILO_VCS} ) {
+		if ( ! -d $r && $bid) {
+			#repo dir does not exists, so make it
+            my $b=$host->get('branch',(id=>$bid)) or _fail("unable to get branch from host");
+            $real_r = [ grep { /^$r\// }
+                   map { ($_->{vcs} eq $ENV{SILO_VCS})?$_->{path}:undef }
+                   values %{$b->{repositories}} ];
+		} else {
+			# directory exists and we should find a repositories
+			my @children=$src->find_child_repos($r);
+			if ( @children ) {
+				push(@$real_r,@children);
+			} else {
+				push(@$real_r,$src->find_parent_repo($r));
+			}
+		}
+	}
+	return scalar @$real_r?@$real_r:($r);
+}
+
+sub logs {
+	my $args=$cmd{logs};
+	my @dirs=@{$args->{repository}};
+	my @repos;
+	my $src=new Silo::Source($args) or _fail("unable to create source");
+	push(@dirs,"./") unless scalar @dirs;
+
+	foreach my $r (@dirs) {
+		$r="./" unless $r;
+		my @rr=list_repos_in($src,$r);
+		push (@repos,@rr) if @rr;
+	}
+	%_=();@repos=grep {!$_{$_}++} @repos;
+	my @unsorted=$src->logs({repos=>\@repos, spec=>$args->{spec}});
+	my @logs=sort { $a->{time} <=> $b->{time} } @unsorted;
+	foreach my $ch (@logs) {
+		print "$ch->{dir}:
+	changeset:   $ch->{changeset}
+	user:        $ch->{user}
+	date:        $ch->{date}
+	summary:     $ch->{summary}
+"
+	}
+	print "pull ".join(", ",@dirs)." success!\n";
+	return 1;
+}
+
+
+
+sub pull_repo {
+	my $args=$cmd{pull};
+    my $bid=$args->{from}->{branch};
+	my $repository=$args->{repository};
+	my $src=new Silo::Source($args) or _fail("unable to create source");
+	_fail("repositories list is empty") unless ( @$repository );
+	foreach my $r (@$repository) {
+		my @rr=list_repos_in($src,$r,$bid);
+		foreach my $x ( @rr ) {
+    		$src->locate("$x/") or _fail("pull failed");		
+		}
+	}
+	print "pull ".join(", ",@$repository)." success!\n";
+	return 1;
+}
+
+sub pull_project {
+	my $args=$cmd{pull};
+	my $projects=$args->{project};
+	my $src=new Silo::Source($args) or _fail("unable to create source");
+	_fail("project list is empty") unless ( @$projects );
+	foreach my $p (@$projects) {
+		my $prj=new Silo::Project($p,$args)
+	   		or _fail("unable to create project $p\n");
+		$prj->pull() or _fail("pull failed");
+		$prj->cleanup();
+		_info("$p done");
+	}
+	print "pull ".join(", ",@$projects)." success!\n";
+	return @$projects;
+}
+
+sub pull_branch {
+	my $args=$cmd{pull};
+	my $branch=$args->{branch};
+	$args->{repository}=get_branch_repos($branch);
+	return pull_repo();
+}
+
+sub s_push {
+	my $args=$cmd{push};
+	return push_project() if $args->{project};
+	push(@{$args->{repository}},"./") unless ($args->{repository});
+	return push_repo() if $args->{repository};
+}
+
+sub push_repo {
+	my $args=$cmd{push};
+	my $repository=$args->{repository};
+	my $src=new Silo::Source($args);
+	_fail("repositories list is empty") unless ( @$repository );
+	foreach my $r (@$repository) {
+		my @rr=list_repos_in($src,$r);
+		foreach my $x ( @rr ) {
+			$src->push("$x/") or _fail("push $x failed");		
+		}
+	}
+	return 1;
+}
+
+sub push_project {
+	my $args=$cmd{push};
+	my $projects=$args->{project};
+	$args->{src}=new Silo::Source($args);
+	_fail("project list is empty") unless ( @$projects );
+	foreach my $p (@$projects) {
+		my $prj=new Silo::Project($p,$args)
+	   		or _fail("unable to create project $p\n");
+		$prj->push() or _fail("push failed");
+		$prj->cleanup();
+		_info("$p done");
+	}
+	print "push ".join(", ",@$projects)." success!\n";
+	return @$projects;
+}
+
+sub s_foreach {
+	my ($do)=@_;
+	my $args=$cmd{$do}; #record of diff
+	return foreach_project($do) if $args->{project};
+	push(@{$args->{repository}},"./") unless ($args->{repository});
+	return foreach_repo($do) if $args->{repository};
+}
+
+sub foreach_repo {
+	my ($do)=@_;
+	my $args=$cmd{$do};
+	my $repository=$args->{repository};
+	my $src=new Silo::Source($args);
+	_fail("repositories list is empty") unless ( @$repository );
+	foreach my $r (@$repository) {
+		$src->$do("$r") or _fail("$do $r failed");		
+	}
+	return 1;
+}
+
+sub foreach_project {
+	my ($do)=@_;
+	my $args=$cmd{$do};
+	my $projects=$args->{project};
+	$args->{src}=new Silo::Source($args);
+	_fail("project list is empty") unless ( @$projects );
+	foreach my $p (@$projects) {
+		my $prj=new Silo::Project($p,$args)
+	   		or _fail("unable to create project $p\n");
+		$prj->$do() or _fail("$do failed");
+		$prj->cleanup();
+		_info("$p done");
+	}
+	print "$do ".join(", ",@$projects)." success!\n";
+	return @$projects;
+}
+
+
+
+sub release {
+	my $args=$cmd{release};
+	my $branch=$args->{branch} or _fail("branch id is unknown");
+	my $rc=$args->{rc} or _fail("release candidate number is unknown");
+	my $b=$host->get('branch',(id=>$branch)) 
+			or _fail("branch #$branch not found");
+	my @p=map { "$_->{name} version ".($host->get('release',(project_id=>$_->{id},branch_id=>$branch))->{version})." (based on RC$rc from branch $branch)" }  values %{$b->{projects}};
+	_que("
+   This will release the candidate #$rc as official Sentivision Release. 
+Branch #$branch will be closed 
+The final version(s) of branched project(s) will be:
+   * ".join("\n  * ", @p)."
+Once you type 'yes' it will not be possible to neither cancel nor undone
+the process. Are you sure you want to release?") or _fail("canceled");
+	$host->req('release',(branch=>$branch,rc=>$rc)) or _fail("branch $branch release failed: $host->{err}");
+	my $b=$host->get('branch',(id=>$branch)) 
+			or _fail("failed to get branch: $host->{err}");
+	my ($tdir,$bdir)=(tempdir(CLEANUP=>1),$ENV{PWD});
+	$ENV{PWD}=$tdir; chdir($tdir);
+	$args->{sync}=1;
+	$args->{src}=new Silo::Source($args);
+	my $summary;
+	foreach my $bp ( values %{$b->{projects}} ) {
+		next unless $bp;
+		my $r=$host->get('release',(project_id=>$bp->{id},branch_id=>$branch)) 
+			or _fail("failed to get project: $host->{err}");
+#		my $prj=new Silo::Project($bp->{name},$args)  or _fail("branch failed at $bp\n");
+#		$prj->get_harvest({dir=>$bdir,ver=>$r->{version}}) or _warn("unable to fetch harvest for project $bp");
+		$summary.="$bp->{name} has complete version $r->{version}, (the same as ".$r->{version}."rc$rc)\n";
+	}
+	_sys("rm -rf $tdir",proc=>"cleanup temporary...");
+	chdir($bdir); $ENV{PWD}=$bdir;
+	print $summary;
+	print "release succeeded and may be delivered to client!\n";
+	print "pull release harvest using silo command 'silo pull harvest from branch $branch'\n";
+	return 1;
+}
+
+sub make_line {
+	my ($ref)=@_;
+	if (ref $ref eq 'HASH') {
+		return "{ ".join(", ",
+				map { "$_=>".make_line($ref->{$_}) } keys %$ref)
+				." }";
+	} elsif ( ref $ref eq 'ARRAY' ) {
+		return "[ ".join(", ",
+				map { make_line($ref->{$_}) } @$ref)
+				." ]";
+	} elsif ( $ref=~/\s/ ) {
+		return "'$ref'";
+	}
+	return $ref;
+}
+
+sub list {
+	my $args=$cmd{list};
+	$args->{spec}->{id}=str2bid($args->{spec}->{id}) if ( $args->{tab} eq 'branch' && $args->{spec} && $args->{spec}->{id} );
+	my $list=$host->list($args->{tab},%{$args->{spec}})
+	                                 or _fail("host: $host->{err}");
+#	_d("Dump: ".Dumper($list));
+	if ( $args->{tab} eq 'changesets' ) { #special treatment for changeset list
+		print Dumper($list);
+		return 1;
+	}
+
+	foreach my $r ( sort { $a->{id} <=> $b->{id}} @$list ) {
+		if ( $args->{tab} eq 'project' ) {
+#			print "#$r->{id}: $r->{name} ($r->{releases}->{current}->{version}) - $r->{comment}
+#\treleases:
+#\t\t".join("\n\t\t", map { "$_->{version} $_->{state} in branch $_->{branch_id} by $_->{owner}" } grep { $_->{version}=~/^\d/ } map { $r->{releases}->{$_} } sort { $a <=> $b } grep { /\d+/ } keys %{$r->{releases}} )."\n";
+			print "$r->{name} ($r->{releases}->{current}->{version}) - $r->{comment}\n".
+			      "\treleases:\n".
+			      join("", map { "\t\t$_->{version} $_->{state} in branch #$_->{branch_id} by $_->{owner}\n" } map { $r->{releases}->{$_} } sort { $a <=> $b } grep { /\d+/ } keys %{$r->{releases}} );
+		} elsif (  $args->{tab} eq 'branch' ) {
+			print "#$r->{id}: ".($r->{state} eq 'complete'?'CLOSED':'OPEN')." (by $r->{owner}".($r->{date}?", ".scalar localtime($r->{date}):"").") $r->{type} branch (made from branch $r->{parent_id})".($r->{comment}?" - $r->{comment}":"").
+		          "\tprojects:\n".
+			      join("", map {"\t\t$_->{name} ($_->{release}->{version}".($r->{candidates}->{current} && $r->{state} ne 'complete'?"rc$r->{candidates}->{current}->{version}":"").") - $_->{comment}\n"} values %{$r->{projects}}).
+				"\tcandidates:\n".
+				join("", map {"\t\trc$_->{version} by $_->{owner}".($_->{date}?", ".scalar localtime($_->{date}):"")."\n"} map { $r->{candidates}->{$_} } sort { $a <=> $b } grep { /\d+/ } keys %{$r->{candidates}}).
+			      "\trepositories:\n".
+			      (scalar @$list > 1?"\t\t".join(", ",sort map {$_->{path}} values %{$r->{repositories}})."\n"
+			                         :join("",sort map {"\t\t$_->{path} - $_->{comment}\n"} values %{$r->{repositories}}));
+		} elsif ( $args->{tab} eq 'repository' ) {
+			print "$r->{path} - $r->{comment}\n";
+		} elsif ( $args->{tab} eq 'share' ) {
+			print "$r->{tab_name} $r->{tab_id} shared with $r->{gr_name} for $r->{access} - $r->{comment}\n";
+		} elsif ( $args->{tab} eq 'observer' ) {
+			my @obs;
+			if ($r->{repo}) {
+				push(@obs,"repository $r->{repo}->{path}");
+			}
+			if ($r->{project}) {
+				push(@obs,"project $r->{project}->{name}");
+			}
+			if ($r->{branch}) {
+				push(@obs,"branch $r->{branch}->{id}");
+			}
+			print "$r->{address} observes ".(@obs?join(" in ",@obs):"all")." events - $r->{comment}\n";
+		} else {
+			print Data::Dumper->Dump([$r],[qw(entry)]);
+		}
+	}
+	return 1;
+}
+
+sub obsolite___deregister_repository {
+	my $args=$cmd{deregister};
+    my $bid=$args->{from}->{branch};
+	my $paths=$args->{repository};
+	my $branch=$args->{from}->{branch} or _fail("branch should be specified!");
+	#get real repository path
+	my $source=new Silo::Source($args) or _fail("unable to create source");
+	foreach my $r ( @$paths ) {
+		foreach my $p ( list_repos_in($source,$r,$bid) ) {
+			my $spec=$source->restore_spec($p);
+			$p=$spec->{repo} if $spec && $spec->{repo};
+			unless ( _que("Are you sure you want to deregister repository $p from branch $branch?") ) { _warn("skipped"); next }
+			my $ref=$host->req('deregister',( tab=>"repository", row=>{path=>$p}, branch=>$branch )) or _fail("host: $host->{err}");
+		}
+	}
+	print "deregistration success!\n";
+	return 1;
+}
+
+sub obsolite___deregister_project {
+	die "not yet implemented";
+}
+
+sub obsolite___deregister {
+	my $args=$cmd{deregister};
+	return deregister_repository() if ($args->{repository});
+	return deregister_project() if ($args->{project});
+}
+
+sub register {
+	my $args=$cmd{register};
+	my $tab=$args->{tab};
+	my $entry=$args->{spec};
+	_info("$tab to DB:");
+	foreach my $e ( keys %$entry ){ #get field names in format "field=value"
+		_info("\t$e: ".($entry->{$e}?$entry->{$e}:"<empty>"));
+	}
+	#request users attention and decision
+	_que("Are you sure you want to register entry on host $host->{rname}?") or _fail("cancel");
+	my $ref=$host->req('register',( tab=>$tab, row=>$entry )) or _fail("host: $host->{err}");
+	print "registration success!\n";
+	return 1;
+}
+
+sub deregister {
+	my $args=$cmd{deregister};
+	my $tab=$args->{tab};
+	my $entry=$args->{spec};
+
+	unless ($tab eq 'observer')	{
+		_fail("$tab deregistration is not supported yes");
+	}
+
+	_info("deregistering $tab where ".join(" and ", map {"$_=$entry->{$_}"} grep {$entry->{$_}} keys %$entry));
+	#request users attention and decision
+	_que("Are you sure you want to deregister entry on host $host->{rname}?") or _fail("cancel");
+
+	my $ref=$host->req('deregister2',( tab=>$tab, row=>$entry )) or _fail("host: $host->{err}");
+	print "deregistered $ref->{count} entry!\n";
+	return 1;
+}
+sub comment {
+	my $args=$cmd{comment};
+	my $text=$args->{text};
+	my ($tab,$id);
+	if ( $args->{project} ) {
+		($tab,$id)=('project',$args->{project}->[0]);
+		silo_usage("only one project may be specified") if scalar @{$args->{project}} > 1;
+	} elsif ( $args->{repository} ) {
+		($tab,$id)=('repository',$args->{repository}->[0]);
+		silo_usage("only one repository may be specified") if scalar @{$args->{repository}} > 1;
+	} elsif ( $args->{share} ) {
+		($tab,$id)=('share',$args->{share});
+	} elsif ( $args->{branch} ) {
+		($tab,$id)=('branch',$args->{branch});
+	}
+	my $name=$args->{project}->[0];
+	#request users attention and decision
+	my $ref=$host->req('comment',( tab=>$tab, name=>$id, text=>$text )) or _fail("host: $host->{err}") or _fail("host: $host->{err}");
+	print "comment success!\n";
+	return 1;
+}
+
+sub sshare {
+	my $args=$cmd{share};
+	my $group=$args->{with}->{group};
+	my $access=$args->{'for'}->{access};
+	my $ref;
+	if ( $args->{branch} ) {
+		$ref=$host->req('share',
+			( obj=>"branch", bid=>$args->{branch},
+				gr_name=>$group, access=>$access));
+	} elsif ( $args->{base} ) {
+#		my $h=str2h($args->{base}) or _fail("incorrect project name format");
+		$ref=$host->req('share',
+			( obj=>"base", string=>$args->{base},
+				gr_name=>$group, access=>$access));
+	} else {
+		_fail("not yet supported");
+	}
+	_fail("host: $host->{err}") unless ($ref);
+	print "share success!\n";
+	return 1;
+}
+
+sub silo_usage {
+	my ($err)=@_;
+	my $args=$cmd{help};
+	
+	if ( $args->{cmd} eq 'make' || $cmd{make} ) {
+		print "
+Command makes a project, branch or component.
+Usage:
+  silo make [project] [<names>] [sync from [branch] <id>] [verbose] [unit-test]
+    Makes a giving project or projects build.
+      [<names>] - name(s) of project(s)
+      [sync] - get source changes from branch repositories
+      [from [branch] <id>] - specify existing branch id to build
+        project from giving branch
+      [verbose] - verbose output print all commands in SRM style
+      [unit-test] - do unit-tests on project
+      Examples:
+        to make a build sbb-base-smp:
+      # silo make project sbb-base-smp  
+        or just:
+      # silo make sbb-base-smp  
+        to make it from branch 7:
+      # silo make sbb-base-smp from branch 7  
+        to restore previos build:
+      # silo make sbb-base-smp restore
+  silo make branch <id> [[project] <names>] [rc] [sync] [verbose] [unit-test]
+    Makes a build of all projects registred in branch.
+      <id> - id of existing branch
+      [project] <names> - names of projects to build first,
+        all of   them must be included in branch
+      [rc] - use this option if you want to build 
+        Release Candidate from branch
+      [sync] - get source changes from branch repositories
+      [verbose] - verbose output print all commands in SRM style
+      [unit-test] - do unit-tests on project
+      Examples:
+        to make a build of all projects in branch 7:
+      # silo make branch 7
+        to make sbb-base-smp and then other 
+        branched in 7 projects:
+      # silo make branch 7 project sbb-base-smp
+        to make a Release Candidate from branch 7:
+      # silo make branch 7 rc
+  silo make component <names> [<target>] [from project <name>] [unit-test]
+    Makes a component(a) in context of project. By default silo 
+    will try to find a context and will ask you to select one 
+    if more than one will found.
+      <names> - components names
+      [<target>] - as an option you may specify single target
+        to make on components
+      [from [project] <name>] - projects name to make the 
+        components in it context
+      [unit-test] - do unit-tests on project
+      Examples:
+        to make single component:
+      # silo make SMP/player/player.comp
+        to make component in context of sbb-base-smp:
+      # silo make SMP/player/player.comp from project sbb-base-smp
+        to make only compile target on component
+      # silo make SMP/player/player.comp compile
+";
+	} elsif ( $args->{cmd} eq 'comment' || $cmd{comment} ) {
+		print "
+Command adds comment to a project/repository/branch on host.
+Usage:
+  silo comment project|repository|branch <name> <comment>
+    Examples:
+      to comment sbb-base-smp:
+    # silo comment project sbb-base-smp \"Base SMP for SBB platform\"'
+      to comment branch #123:
+    # silo comment branch 123 \"New XYZ functionality for ABC project\"
+";
+	} elsif ( $args->{cmd} eq 'register' || $cmd{register} ) {
+		print "
+Command registers entries in the database.
+Usage:
+  silo register project name=<name> comment=<description> [version=<initial>]
+    Registers project on host.
+       name=<name> - name of project to register
+      comment=<description> - short description of project
+      [version=<initial>] - initial version of project
+    Examples:
+      to add sbb-base-smp to host:
+    # silo register project name=sbb-base-smp comment='Base SMP for SBB Dragon platform'
+      to add sbb-base-smp to host and set initial
+      version to 6, to have nearest release version 7
+    # silo register project name=sbb-base-smp comment='Base SMP for SBB Dragon platform' version=6
+  silo register repository path=<dir> [vcs=hg] comment=<description>
+      path=<dir> - directory to repository in silo root on host
+      [vcs=hg] - VCS type; only Mercurial is currently supported
+      comment=<desc> - a short description about repository
+    Example:
+      to register SMP repository on host:
+    # silo register repository path=SMP/examples comment='SMP example usage of SAGE'
+  silo register observer address=<e-mail> [branch=<id>] [repository=<path>] [project=<name>] [comment=<description>]
+      address=<e-mail> - e-mail address for notifications
+	  branch=<id> - id of branch to be observed
+      repository=<path> - path of repository to be observed
+	  project=<name> - name of project to be observe
+	  [comment=<description>] - optional comment
+    Example:
+      to be notified on branch 456 changes
+    # silo register observer address=ath\@cubiware.com branch=456
+	NOTE: the option uses exim utility which should properly configured on SiloD machine.
+";
+	} elsif ( $args->{cmd} eq 'share' || $cmd{share} ) {
+		print "
+Command registers share for group.
+Usage:
+
+  silo share branch <id> with <group> for <access> [at <host>]
+      <id> - the branch id
+      <group> - system (*nix) group on server machine
+      <access> - should be 'read' for read-only or 'write' for read/write access
+    Examples:
+      to share branch #478 for read/write with users of philips groups do:
+    # silo share branch 478 with philips for write
+      or the same but only for read access:
+    # silo share branch 478 with philips for read
+
+  silo share base <name> with <group> [for <access>] [at <host>]
+      <name> - the full name of base package (the same like in using the base prj file)
+      <group> - system (*nix) group on server machine
+    Examples:
+      to share base package qb-altius-base-smp-1.2rc4 with philips group do:
+    # silo share base qb-altius-base-smp-1.2rc4 with philips
+";
+	} elsif ( $args->{cmd} eq 'deregister' || $cmd{deregister} ) {
+		print "
+Command deregisters entry from the database. 
+Usage:
+  silo register observer address=<e-mail> [branch=<id>] [repository=<path>] [project=<name>] [comment=<description>]
+    Example:
+      to stop previosly reqiested notifications about changes in branch 456
+    # silo deregister observer address=ath\@cubiware.com branch=456
+";
+	} elsif ( $args->{cmd} eq 'branch' || $cmd{branch} ) {
+		print "
+Command creates a release branch with given registred projects.
+Usage:
+  silo branch [release|phase|patch|feature] <projects> from [branch] <id>
+      <projects> - names of projects to branch
+      release - makes release branch with incremented version release number
+      phase - makes release branch with incremented version phase number
+      patch - makes patch branch from parent with incremented version patch number
+      feature - makes feature branch without version tracking
+      from [branch] <id> - parent branch if not a HEAD
+    Note: all projects in branch may not be branched in 
+      any other unreleased branches
+    Examples:
+      to branch projects sbb-base-smp 
+      and sbb-base-smp-odtv:
+    # silo branch sbb-base-smp sbb-base-smp-odtv
+      to branch projects from branch 7:
+    # silo branch sbb-base-smp sbb-base-smp-odtv from branch 7
+      to branch patch from branch 7
+    # silo branch patch from branch 7
+";
+	} elsif ( $args->{cmd} eq 'release' || $cmd{release} ) {
+		print "
+Command releases projects in branch by unpulling all changes after last
+Release Candidate and making branch read-only.
+Usage:
+  silo release branch <id> rc <number>
+      branch <id> - ID of releasing branch
+      rc <number> - number of Release Candidate which you 
+        want to release
+    Note: only last one RC is allowed
+    Examples:
+      to release branch 7 with release candidate 3:
+    # silo release branch 7 rc 3
+";
+	} elsif ( $args->{cmd} eq 'list' || $cmd{list} ) {
+		print "
+Command lists registred on host projects, branches or repositories.
+It also provedes information about branches content and projects
+released versions.
+Wildcards in conditions arguments are supported.
+Usage:
+  silo list branches [[id=]<id>] [project=<project name>] [repository=<path>] [state=open|closed] [release=<version>]
+      project=<project name> - to list only branches with specified project
+      repository=<repo path> - to list only branches with specified repository path
+      state - to list only open or closed branches (open is a default if no other conditions)
+      id=<id> - to list only branch with specified id
+      release=<version> - to list only branch with version number
+  silo list projects [[name=]<name>] [id=<id>]
+      project=<project name> - to list only projects with specified name
+      id=<id> - to list only project with specified id
+  silo list repositories [<path> | [path=<path>] [vcs=<VCS name>] [id=<id>]]
+      path=<repo path> - to list repositories with specified path
+      vcs=<VCS name> - to list repositories controlled by specified VCS
+      id=<id> - to list only repository with specified id
+  silo list shares [[group=]<group>] [tab_name=<name>] [tab_id=<id>] [access=<access>] [id=<id>]
+     group=<group> - to list specified group
+     access=<access> - list only specified access (read or write)
+    Examples:
+      to list all branches including project sbb-dragon
+    # silo list branches project=sbb-dragon
+      to list all branches including repository SMP/SAGE
+    # silo list branches repository=SMP/SAGE
+      to list only branch #119 (short request version)
+    # silo list branch 119
+      to projects which name ends with sdk (short request version)
+    # silo list project '*sdk'
+      to repositories of SMP (short request version)
+    # silo list repo 'SMP/*'
+      to list shares with group philips
+    # silo list shares philips
+  silo list observers address=<e-mail> [branch=<id>] [repository=<path>] [project=<name>]
+     address=<e-mail> - to filter observers by e-mail address
+	 [branch=<id>] - to filter observers by branch id
+	 [repository=<path>] - to filter observers by repository path
+	 [project=<name>] - to filter observers by project name
+";
+	} elsif ( 
+			$args->{cmd} eq 'pull' || $cmd{pull}  ||
+			$args->{cmd} eq 'push' || $cmd{push}  
+		) {
+		print "
+Commands to pull/push repositories from/to different branches.
+Usage:
+  silo pull repository <names> from [branch] <id>
+  silo push repository <names> to [branch] <id>
+    Pulles/pushes changes from/to branch
+      repository <names> - names of repositories
+      from/to [branch] <id> - by default silo will
+         pull/push from/to native branch, set 
+         different branch id if you want pull/push
+         to another branch
+    Examples:
+      to pull repository SMP from branch 7
+    # silo pull repository SMP from branch 7
+      to push repository SMP to branch 3
+    # silo push repository SMP to branch 3
+  silo pull project <names> from [branch] <id>
+  silo push project <names> to [branch] <id>
+    Iterates over projects and pull/push all repositories
+    where projects has components.
+      project <names> - names of projects
+      from/to option is the same like above
+    Examples:
+      to pull project sbb-base-smp from branch 7
+    # silo pull project sbb-base-smp from branch 7
+      to push project sbb-base-smp to branch 3
+    # silo push project sbb-base-smp to branch 3
+  silo pull branch <id>
+  silo push branch <id>
+    Iterates over projects from branch and pull/push all 
+    repositories where projects has components.
+    Examples:
+      to pull all projects from branch 7
+    # silo pull branch 7
+      to push all projects from branch 7
+    # silo push branch 7
+  silo pull harvest from [branch] <id>
+    Pulls projects harvest from released branch. 
+    Examples:
+      to pull all projects harvest from branch 7
+    # silo pull harvest from branch 7
+  silo pull sbuild [name]
+    Pulls project sbuild from release branch. 
+    Examples:
+      to pull sbuild of sv-stb7100-base-sys version 1.0 rc 2
+    # silo pull sbuild sv-stb7100-base-sys-1.0rc2
+  silo pull release [name]
+    Pulls project sbuild+sources from release branch. 
+    Examples:
+      to pull release of sv-stb7100-base-sys version 1.0 rc 2
+    # silo pull release sv-stb7100-base-sys-1.0rc2
+";
+	} elsif ( $args->{cmd} eq 'parse' || $cmd{parse} ) {
+		print "
+Parses the project,checks the syntax and prints some information about components
+Usage:
+  silo parse <project name> [sync from [branch] <id>] [verbose]
+    Example:
+      parses the project crp1-base-sys in sources
+    # silo parse crp1-base-sys
+      parses the project crp1-base-sys in sources getting from branch #42
+    # silo parse crp1-base-sys sync from branch 42
+";
+	} elsif ( 0 && ( $args->{cmd} eq 'record' || $cmd{record} ) ) { # DISABLED!!!
+		print "
+Command records changes in projects or repositories.
+Usage:
+  silo record repository <names>
+    Records changes in repositories.
+    Example:
+      to record changes in repository SMP:
+    # silo record repository SMP
+  silo record project <names>
+    Iterates over projects and records chanes in components
+    Example:
+      to record changes in sbb-base-smp project:
+    # silo record project sbb-base-smp
+";
+	} elsif ( $args->{cmd} eq 'diff' || $cmd{diff} ) {
+		print "
+Command prints changes in projects or repositories.
+Usage:
+  silo diff repository <names> [briefly]
+    Prints changes in repositories.
+    Example:
+      to print changes in repositories of SMP:
+    # silo diff repository SMP
+      to print changes in repositories of SMP, briefly:
+    # silo diff repository SMP briefly
+  silo diff project <names> [briefly]
+    Iterates over projects and prints changes in components
+    Example:
+      to see changes in sbb-base-smp project:
+    # silo diff project sbb-base-smp
+";
+	} elsif ( $args->{cmd} eq 'logs' || $cmd{logs} ) {
+		print "
+Command lists sorted changsets of repositories. May filter results by date, user or changeset summary.
+Usage:
+  silo logs <repositories> [from=<date>] [last=<number>|<period>] [user=<regexp>] [summary=<regexp>]
+      <repositories> - is a list of repositories or list of directories with repositories,
+      from=<date> - specify date in format of `date -R` to list changesets from the date till now, ex. from=\"Mon, 17 Dec 2007 17:31:55 +0100\" to list changes from the 17 of December 2007,
+      last=<number> - specify last number of changeset to list, ex. last=10
+      last=<period> - specify to list changesets from last number of hours/days/months/years, ex. last=10d to list changes from last 10 days (h=hour,d=day,m=mounth,y=year),
+      user=<regexp> - to list only changesets where user matches perl regexp,
+      summary=<regexp> - to list only changesets where summary matches perl regexp.
+    Example:
+      to list all changes in repositories SMP
+    # silo logs SMP
+      to list last 20 changes from repository SMP
+    # silo logs SMP last=20
+      to list repository SMP changesets from last 20 days
+    # silo logs SMP last=20d
+      to list repository SMP changesets from \"Mon, 17 Dec 2007 17:31:55\"
+    # silo logs SMP from=\"Mon, 17 Dec 2007 17:31:55\"
+";
+	} else {
+		# Silo usage
+		print "
+Usage:
+silo <command> [<options>]
+commands:
+  make <objects> [<options>]
+    objects:
+    project <names> [sync from [branch] <id> [at <host>]] [verbose] [unit-test]
+    branch <id> [[project] <names>] [rc] [sync] [verbose] [unit-test] [at <host>]
+    component <names> [<target>] [from project <name>] [unit-test]
+    file [<makefile> [<target>]]
+    shell [<command>]
+  parse <project name> [sync from [branch] <id> [at <host>]] [verbose]
+  register <entry type> <specification> [at <host>]
+    entry types:
+    project name=<name> comment=<description> [version=<initial>]
+    repository path=<dir> [vcs=<type>] comment=<description>
+    observer address=<e-mail> [branch_id=<id>] [repository=<path>] [project=<name>] [comment=<description>]
+  deregister <entry type> <specification> [at <host>]
+    observer address=<e-mail> [branch_id=<id>] [repository=<path>] [project=<name>] [comment=<description>]
+  comment project|repository|branch <comment> [at <host>]
+  branch <projects> from [branch] <id> [at <host>]
+  release branch <id> rc <number> [at <host>]
+  share branch|base <id|name> with <group> for <access> [at <host>]
+  list projects|repositories|branches|shares [<conditions>] [at <host>]
+  pull <object> from [branch] <id> [at <host>]
+    objects:
+    [project] <names> from [branch] <id>
+    branch <names>
+    repository <names> from [branch] <id>
+    harvest from [branch] <id>
+    sbuild <names>
+    release <names>".
+#  record [project]|repository <names> <- this is not supported
+"
+  diff [project]|repository <names> [briefly]
+  push <object> to [branch] <id> [at <host>]
+    objects:
+    [project] <names> to [branch] <id>
+    repository <names> to [branch] <id>
+  logs <repositories> [<filters>]
+  help [command]
+  version
+";
+	}
+
+	_err("$err") if ($err);
+	exit 1;
+}

@@ -1,0 +1,49 @@
+[ui]
+editor=vim
+username="Pawel Piatkowski <pawelp@cubiware.com>"
+ignore=~/.hgignore
+merge=meld
+
+[extensions]
+color=
+transplant=
+hgext.record=
+record=
+rdiff=/home/pablo/bin/rdiff.py
+hgk=
+#/usr/local/lib/python2.5/site-packages/hgext/hgk.py
+#crecord = ~/.crecord/
+#hgext.hgview=~/hgview/hgview/hgext/hgview.py
+hgext.hgview=/home/pablo/bin/hgview-1.2.1-1/hgext/hgview.py
+hgsilo=/home/pablo/bin/hgsilo.py
+
+[hooks]
+# run hgsilo hook on every commited changeset
+commit.hgsilo=python:hgsilo.hook
+
+[color]
+status.modified = magenta bold
+status.added = green bold
+status.removed = red bold
+status.deleted = cyan bold
+status.unknown = blue bold
+status.ignored = black bold
+diff.diffline = underline
+diff.extended = cyan bold
+diff.file_a = red bold
+diff.file_b = green bold
+diff.hunk = blue
+diff.deleted = red
+diff.unserted = green
+diff.changed = bold
+diff.trailingwhitespace = bold red_background
+
+
+[merge-tools]
+filemerge.premerge=true
+meld.args=$base $local $other
+
+[hgsilo]
+mantisconnect.url=https://mantis.cubiware.com/api/soap/mantisconnect.php
+mantisconnect.user=pawelp
+mantisconnect.password=taaajasne

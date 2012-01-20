@@ -1,0 +1,8 @@
+#!/bin/bash
+
+file="$1"
+echo "mv $file $file.bak"
+cp "$file" "$file.bak"
+expand -4 $file | cat -v -t > $file.detabbed
+mv $file.detabbed $file
+

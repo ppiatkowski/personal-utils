@@ -1,0 +1,10 @@
+
+.silo_repo.xml
+
+syntax: glob
+
+*.pyc
+
+cscope.out
+
+*.orig

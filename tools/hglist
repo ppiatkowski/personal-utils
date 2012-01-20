@@ -1,0 +1,63 @@
+#!/bin/sh
+
+REPO_BASE_DIR=$1
+START_DIR=
+if [ $# -ge 2 ]; then
+  START_DIR=$2
+fi
+MAX_DEPTH=99
+if [ $# -ge 3 ]; then
+  MAX_DEPTH=$3
+fi
+
+# $1 : directory, relative to REPO_BASE_DIR
+print_repo()
+{
+#  local HGRES=`(cd $THIS_DIR && hg log --template "{node},")`
+#  echo -e "$THIS_DIR: $HGRES\n"
+  echo -e "$THIS_DIR  "
+}
+
+# $1 : directory, relative to REPO_BASE_DIR
+# $2 : depth left
+search_dir()
+{
+  local THIS_DIR=$1
+  local -i DEPTH_LEFT=$2
+  local PWD=$REPO_BASE_DIR/$THIS_DIR
+
+  if [ ! -d "$PWD" ]; then
+    echo -e "directory $PWD does not exist!";
+    exit 1;
+  fi
+
+  if [ -d "$PWD/.hg" ]; then
+    print_repo "$THIS_DIR";
+    hg status $THIS_DIR
+    return;
+  fi
+
+  if [ $DEPTH_LEFT -le 0 ]; then
+    return;
+  fi
+
+  local FILE_NAME
+  for FILE_NAME in `(cd $PWD && ls)`; do
+    if [ ! -d "$PWD/$FILE_NAME" ]; then
+      continue;
+    fi
+    if [ "$THIS_DIR" == "" ]; then
+      search_dir $FILE_NAME $(($DEPTH_LEFT - 1));
+    else
+      search_dir $THIS_DIR/$FILE_NAME $(($DEPTH_LEFT - 1));
+    fi
+  done;
+}
+
+cd $REPO_BASE_DIR;
+
+search_dir "$START_DIR" $MAX_DEPTH;
+
+
+
+

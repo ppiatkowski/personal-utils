@@ -1,0 +1,9 @@
+eclipse conf
+
+
+install.sh ktory 
+ - tworzy HOME/bin
+ - wrzuca tam toole
+ - dodaje do .bashrc PATH=PATH:HOME/bin
+ - instaluje conf
+
